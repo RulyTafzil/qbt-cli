@@ -297,19 +297,12 @@ class QbtApp(App):
         yield DataTable(id="torrents", cursor_type="row")
         yield Footer()
 
-    # def on_mount(self) -> None:
-    #     table = self.query_one(DataTable)
-    #     # Added Category, Removed Ratio
-    #     self.column_keys = table.add_columns(
-    #         "Name", "State", "Category", "Size", "Progress", "↓ Speed", "↑ Speed", "ETA"
-    #     )
 
-    # Refactor table creation to allow for dynamic width for name field.
+    # Setup DataTable
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
 
-        # 1. Define widths for the columns that should stay the same size
-        # Adjust these numbers based on what your data actually looks like
+        # Setting fixed widths for the non-name columns.
         fixed_widths = {
             "State": 9,
             "Category": 8,
@@ -320,13 +313,7 @@ class QbtApp(App):
             "ETA": 6
         }
 
-        # 2. Calculate the "leftover" width for the Name column
-        # self.size.width is the total width of your app/widget
-        # We subtract 4-6 as a "buffer" for the table borders and scrollbar
-        #total_fixed = sum(fixed_widths.values())
-        #name_width = max(20, self.size.width - total_fixed - 16)
-
-        # 3. Add columns individually to apply the widths
+        # 3. Add columns individually to apply the widths. Name column width will be recalculated based on window size
         self.column_keys = [
             table.add_column("Name", width=12, key="name"),
             table.add_column("State", width=fixed_widths["State"]),
