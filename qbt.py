@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 qbt.py — An interactive TUI for qBittorrent-nox Web API using Textual.
-Usage: 
+Usage:
   python qbt.py         # Launch the TUI
   python qbt.py config  # Run the setup wizard to update credentials
 """
@@ -124,7 +124,7 @@ console = Console()
 def run_config_flow():
     """Interactive prompt for updating connection details securely."""
     console.print("[bold cyan]qBittorrent CLI Configuration[/]")
-    
+
     cfg = configparser.ConfigParser()
     if CONFIG_PATH.exists():
         cfg.read(CONFIG_PATH)
@@ -173,14 +173,14 @@ def load_client_from_config() -> QBittorrentClient | None:
     cfg = configparser.ConfigParser()
     if not CONFIG_PATH.exists():
         return None
-        
+
     cfg.read(CONFIG_PATH)
     if "qbittorrent" not in cfg:
         return None
 
     section = cfg["qbittorrent"]
     host, port, username = section.get("host"), section.get("port"), section.get("username")
-    
+
     # Try retrieving password from keyring first, fallback to config.ini
     password = None
     if HAS_KEYRING:
@@ -188,7 +188,7 @@ def load_client_from_config() -> QBittorrentClient | None:
             password = keyring.get_password(SERVICE_NAME, username)
         except Exception:
             pass
-            
+
     if not password:
         password = section.get("password")
 
@@ -297,14 +297,84 @@ class QbtApp(App):
         yield DataTable(id="torrents", cursor_type="row")
         yield Footer()
 
+    # def on_mount(self) -> None:
+    #     table = self.query_one(DataTable)
+    #     # Added Category, Removed Ratio
+    #     self.column_keys = table.add_columns(
+    #         "Name", "State", "Category", "Size", "Progress", "↓ Speed", "↑ Speed", "ETA"
+    #     )
+
+    # Refactor table creation to allow for dynamic width for name field.
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        # Added Category, Removed Ratio
-        self.column_keys = table.add_columns(
-            "Name", "State", "Category", "Size", "Progress", "↓ Speed", "↑ Speed", "ETA"
-        )
+
+        # 1. Define widths for the columns that should stay the same size
+        # Adjust these numbers based on what your data actually looks like
+        fixed_widths = {
+            "State": 9,
+            "Category": 8,
+            "Size": 10,
+            "Progress": 6,
+            "↓ Speed": 7,
+            "↑ Speed": 7,
+            "ETA": 6
+        }
+
+        # 2. Calculate the "leftover" width for the Name column
+        # self.size.width is the total width of your app/widget
+        # We subtract 4-6 as a "buffer" for the table borders and scrollbar
+        #total_fixed = sum(fixed_widths.values())
+        #name_width = max(20, self.size.width - total_fixed - 16)
+
+        # 3. Add columns individually to apply the widths
+        self.column_keys = [
+            table.add_column("Name", width=12, key="name"),
+            table.add_column("State", width=fixed_widths["State"]),
+            table.add_column("Category", width=fixed_widths["Category"]),
+            table.add_column("      Size", width=fixed_widths["Size"]),
+            table.add_column("Prog", width=fixed_widths["Progress"]),
+            table.add_column("↓", width=fixed_widths["↓ Speed"]),
+            table.add_column("↑", width=fixed_widths["↑ Speed"]),
+            table.add_column("ETA", width=fixed_widths["ETA"]),
+        ]
+
+        self.call_after_refresh(self.recalculate_table_width)
+
         self.update_data()
         self.set_interval(1.5, self.update_data)
+
+
+    def recalculate_table_width(self) -> None:
+        """Calculates and sets the width of the 'Name' column."""
+        try:
+            table = self.query_one(DataTable)
+        except:
+            return
+
+        # 1. Sum up the widths of all columns EXCEPT "name"
+        # Note: we check col.key.value to compare the actual string
+        fixed_width_sum = sum(
+            col.width for col in table.columns.values()
+            if col.key.value != "name"
+        )
+
+        # 2. Calculate remaining space
+        # A buffer of 2-4 is usually enough for the vertical scrollbar/borders
+        chrome_buffer = 16
+        available_width = self.size.width - fixed_width_sum - chrome_buffer
+
+        # 3. Update the Name column width using the columns dict
+        # This avoids the "generator" error
+        if "name" in table.columns:
+            table.columns["name"].width = max(15, available_width)
+
+        # 4. Refresh the table to apply the new layout
+        table.refresh()
+
+    def on_resize(self) -> None:
+        """Called automatically by Textual when the terminal resizes."""
+        self.recalculate_table_width()
+
 
     def update_data(self) -> None:
         try:
@@ -345,7 +415,7 @@ class QbtApp(App):
             else:
                 table.add_row(*cells, key=hash_str)
 
-            self.torrent_map[hash_str] = t  
+            self.torrent_map[hash_str] = t
 
         for hash_str in list(self.torrent_map.keys()):
             if hash_str not in fetched_hashes:
@@ -400,7 +470,7 @@ class QbtApp(App):
     def action_info(self) -> None:
         t_hash = self.get_selected_hash()
         if not t_hash: return
-        
+
         t_data = self.torrent_map.get(t_hash)
         if t_data:
             try:
