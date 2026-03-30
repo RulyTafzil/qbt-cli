@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
 """
-qbt.py — A CLI interface for qBittorrent-nox Web API
-Usage: python qbt.py [OPTIONS] COMMAND [ARGS]...
-
-To enable autocomplete in your shell (assuming you alias this script to 'qbt'):
-  Bash: eval "$(_QBT_COMPLETE=bash_source qbt)"
-  Zsh:  eval "$(_QBT_COMPLETE=zsh_source qbt)"
-  Fish: _QBT_COMPLETE=fish_source qbt | source
+qbt.py — An interactive TUI for qBittorrent-nox Web API using Textual.
+Usage: 
+  python qbt.py         # Launch the TUI
+  python qbt.py config  # Run the setup wizard to update credentials
 """
 
 import os
 import sys
-import time
 import configparser
 from pathlib import Path
 
-import click
 import requests
 from rich.console import Console
-from rich.table import Table
+from rich.prompt import Prompt
 from rich.text import Text
-from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from rich import box
-from rich.live import Live
 
-console = Console()
+from textual.app import App, ComposeResult
+from textual.widgets import Header, Footer, DataTable, Static, Button, Label
+from textual.containers import Vertical
+from textual.screen import ModalScreen
 
-CONFIG_PATH = Path.home() / ".config" / "qbt-cli" / "config.ini"
+try:
+    import keyring
+    HAS_KEYRING = True
+except ImportError:
+    HAS_KEYRING = False
 
 # ─────────────────────────────────────────────
-#  Helpers
+#  Helpers & Formatters
 # ─────────────────────────────────────────────
 
 def bytes_to_human(n: int) -> str:
@@ -48,66 +46,23 @@ def seconds_to_human(s: int) -> str:
         return "∞"
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
-    if h:
-        return f"{h}h {m}m"
-    if m:
-        return f"{m}m {sec}s"
+    if h: return f"{h}h {m}m"
+    if m: return f"{m}m {sec}s"
     return f"{sec}s"
 
 STATUS_COLORS = {
-    "downloading": "green",
-    "uploading":   "cyan",
-    "stalledDL":   "yellow",
-    "stalledUP":   "yellow",
-    "pausedDL":    "dim",
-    "pausedUP":    "dim",
-    "checkingDL":  "blue",
-    "checkingUP":  "blue",
-    "queuedDL":    "magenta",
-    "queuedUP":    "magenta",
-    "error":       "red",
-    "missingFiles":"red",
-    "moving":      "blue",
-    "unknown":     "dim",
+    "downloading": "green", "uploading": "cyan",
+    "stalledDL": "yellow", "stalledUP": "yellow",
+    "pausedDL": "dim", "pausedUP": "dim",
+    "checkingDL": "blue", "checkingUP": "blue",
+    "queuedDL": "magenta", "queuedUP": "magenta",
+    "error": "red", "missingFiles": "red",
+    "moving": "blue", "unknown": "dim",
 }
 
 def state_badge(state: str) -> Text:
     color = STATUS_COLORS.get(state, "white")
     return Text(state.upper(), style=f"bold {color}")
-
-
-# ─────────────────────────────────────────────
-#  Config
-# ─────────────────────────────────────────────
-
-def load_config() -> dict:
-    cfg = configparser.ConfigParser()
-    if CONFIG_PATH.exists():
-        cfg.read(CONFIG_PATH)
-    section = cfg["qbittorrent"] if "qbittorrent" in cfg else {}
-    return {
-        "host":     section.get("host", "http://localhost"),
-        "port":     section.get("port", "8080"),
-        "username": section.get("username", "admin"),
-        "password": section.get("password", "adminadmin"),
-    }
-
-def save_config(host, port, username, password):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    cfg = configparser.ConfigParser()
-    cfg["qbittorrent"] = {
-        "host":     host,
-        "port":     port,
-        "username": username,
-        "password": password,
-    }
-    with open(CONFIG_PATH, "w") as f:
-        cfg.write(f)
-    
-    # Secure the config file since it contains a plaintext password
-    os.chmod(CONFIG_PATH, 0o600)
-    console.print(f"[green]✓[/] Config saved to [dim]{CONFIG_PATH}[/]")
-
 
 # ─────────────────────────────────────────────
 #  API Client
@@ -134,29 +89,17 @@ class QBittorrentClient:
         except requests.exceptions.RequestException:
             return False
 
-    def logout(self):
-        self.session.post(self._url("auth/logout"))
-
     def get(self, path: str, **params) -> requests.Response:
         return self.session.get(self._url(path), params=params, timeout=15)
 
     def post(self, path: str, **data) -> requests.Response:
         return self.session.post(self._url(path), data=data, timeout=15)
 
-    def post_multipart(self, path: str, data=None, files=None) -> requests.Response:
-        return self.session.post(self._url(path), data=data, files=files, timeout=30)
-
-    # ... [Rest of API Client methods remain exactly the same as original script] ...
-    def list_torrents(self, filter="all", category=None, sort="added_on", reverse=True):
-        params = {"filter": filter, "sort": sort, "reverse": reverse}
-        if category: params["category"] = category
-        return self.get("torrents/info", **params).json()
+    def list_torrents(self, filter="all", sort="added_on", reverse=True):
+        return self.get("torrents/info", filter=filter, sort=sort, reverse=reverse).json()
 
     def get_properties(self, hash: str):
         return self.get("torrents/properties", hash=hash).json()
-
-    def get_trackers(self, hash: str):
-        return self.get("torrents/trackers", hash=hash).json()
 
     def pause(self, hashes: str):
         return self.post("torrents/pause", hashes=hashes)
@@ -167,461 +110,327 @@ class QBittorrentClient:
     def delete(self, hashes: str, delete_files: bool = False):
         return self.post("torrents/delete", hashes=hashes, deleteFiles=str(delete_files).lower())
 
-    def recheck(self, hashes: str):
-        return self.post("torrents/recheck", hashes=hashes)
-
-    def set_category(self, hashes: str, category: str):
-        return self.post("torrents/setCategory", hashes=hashes, category=category)
-
-    def add_torrent_url(self, urls: str, save_path=None, category=None, paused=False):
-        data = {"urls": urls, "paused": str(paused).lower()}
-        if save_path: data["savepath"] = save_path
-        if category: data["category"] = category
-        return self.post_multipart("torrents/add", data=data)
-
-    def add_torrent_file(self, file_path: str, save_path=None, category=None, paused=False):
-        data = {"paused": str(paused).lower()}
-        if save_path: data["savepath"] = save_path
-        if category: data["category"] = category
-        with open(file_path, "rb") as f:
-            files = {"torrents": (Path(file_path).name, f, "application/x-bittorrent")}
-            return self.post_multipart("torrents/add", data=data, files=files)
-
-    def get_categories(self):
-        return self.get("torrents/categories").json()
-
-    def create_category(self, name: str, save_path: str = ""):
-        return self.post("torrents/createCategory", category=name, savePath=save_path)
-
-    def edit_category(self, name: str, save_path: str):
-        return self.post("torrents/editCategory", category=name, savePath=save_path)
-
-    def remove_category(self, names: str):
-        return self.post("torrents/removeCategories", categories=names)
-
     def get_transfer_info(self):
         return self.get("transfer/info").json()
 
-    def get_version(self):
-        return self.get("app/version").text.strip()
-
-
 # ─────────────────────────────────────────────
-#  Autocomplete & Resolution logic
+#  Config Logic & Safe Credential Storage
 # ─────────────────────────────────────────────
 
-def get_silent_client():
-    """Returns a client for autocomplete without printing errors."""
-    try:
-        cfg = load_config()
-        client = QBittorrentClient(cfg["host"], cfg["port"], cfg["username"], cfg["password"])
-        if client.login():
-            return client
-    except Exception:
-        pass
-    return None
+CONFIG_PATH = Path.home() / ".config" / "qbt-cli" / "config.ini"
+SERVICE_NAME = "qbt-cli"
+console = Console()
 
-def complete_torrent_name(ctx, param, incomplete):
-    """Provides shell autocomplete for torrent names."""
-    client = get_silent_client()
-    if not client: return []
-    torrents = client.list_torrents()
-    return [t["name"] for t in torrents if incomplete.lower() in t["name"].lower()]
-
-def complete_category(ctx, param, incomplete):
-    """Provides shell autocomplete for categories."""
-    client = get_silent_client()
-    if not client: return []
-    cats = client.get_categories()
-    return [c for c in cats.keys() if incomplete.lower() in c.lower()]
-
-def resolve_torrents(client, user_inputs):
-    """Resolves names, exact hashes, or hash prefixes into a list of dicts: [{'hash': X, 'name': Y}]."""
-    if "all" in [i.lower() for i in user_inputs]:
-        return [{"hash": "all", "name": "All Torrents"}]
-
-    torrents = client.list_torrents()
-    results = []
+def run_config_flow():
+    """Interactive prompt for updating connection details securely."""
+    console.print("[bold cyan]qBittorrent CLI Configuration[/]")
     
-    for ui in user_inputs:
-        matched = False
-        for t in torrents:
-            if ui == t["name"] or ui == t["hash"] or t["hash"].startswith(ui):
-                results.append({"hash": t["hash"], "name": t["name"]})
-                matched = True
-        
-        if not matched:
-            console.print(f"[yellow]⚠ Not found:[/] {ui}")
+    cfg = configparser.ConfigParser()
+    if CONFIG_PATH.exists():
+        cfg.read(CONFIG_PATH)
+    section = cfg["qbittorrent"] if "qbittorrent" in cfg else {}
 
-    # Remove duplicates (in case of overlap or multiple duplicate names mapping to identical torrents)
-    seen = set()
-    unique_results = []
-    for r in results:
-        if r["hash"] not in seen:
-            seen.add(r["hash"])
-            unique_results.append(r)
-            
-    return unique_results
+    host = Prompt.ask("Host", default=section.get("host", "http://localhost"))
+    port = Prompt.ask("Port", default=section.get("port", "8080"))
+    username = Prompt.ask("Username", default=section.get("username", "admin"))
+    password = Prompt.ask("Password", password=True)
 
+    # Prepare config file
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cfg["qbittorrent"] = {"host": host, "port": port, "username": username}
 
-# ─────────────────────────────────────────────
-#  Context / shared client
-# ─────────────────────────────────────────────
-
-def get_client(ctx_obj: dict) -> QBittorrentClient:
-    if "client" not in ctx_obj:
-        cfg = load_config()
-        client = QBittorrentClient(cfg["host"], cfg["port"], cfg["username"], cfg["password"])
-        with console.status("[bold blue]Connecting to qBittorrent…"):
-            ok = client.login()
-        if not ok:
-            console.print("[bold red]✗ Login failed.[/] Check your config with [cyan]qbt config[/]")
-            sys.exit(1)
-        ctx_obj["client"] = client
-    return ctx_obj["client"]
-
-
-# ─────────────────────────────────────────────
-#  CLI Root
-# ─────────────────────────────────────────────
-
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.pass_context
-def cli(ctx):
-    """[bold cyan]qbt[/] — CLI interface for qBittorrent-nox Web API\n
-    Run [bold]qbt config[/] first to set your connection details."""
-    ctx.ensure_object(dict)
-
-
-# ─────────────────────────────────────────────
-#  Config command
-# ─────────────────────────────────────────────
-
-@cli.command()
-@click.option("--host",     default=None, help="Host URL, e.g. http://localhost")
-@click.option("--port",     default=None, help="Web UI port (default 8080)")
-@click.option("--username", default=None, help="Web UI username")
-@click.option("--password", default=None, help="Web UI password")
-def config(host, port, username, password):
-    """Set connection details for qBittorrent Web UI."""
-    cfg = load_config()
-
-    host     = host     or Prompt.ask("Host",     default=cfg["host"])
-    port     = port     or Prompt.ask("Port",     default=cfg["port"])
-    username = username or Prompt.ask("Username", default=cfg["username"])
-    if not password:
-        hint = " [dim](leave blank to keep current)[/]" if cfg["password"] else ""
-        new_pw = Prompt.ask(f"Password{hint}", password=True, default="")
-        password = new_pw if new_pw else cfg["password"]
-
-    save_config(host, port, username, password)
-
-    client = QBittorrentClient(host, port, username, password)
-    with console.status("[bold blue]Testing connection…"):
-        ok = client.login()
-    if ok:
-        ver = client.get_version()
-        console.print(f"[green]✓[/] Connected! qBittorrent [bold]{ver}[/]")
-        client.logout()
-    else:
-        console.print("[red]✗ Could not connect. Double-check host/port/credentials.[/]")
-
-
-# ─────────────────────────────────────────────
-#  List command
-# ─────────────────────────────────────────────
-
-def _build_list_table(client, filt, category, sort, asc) -> Table:
-    torrents = client.list_torrents(filter=filt, category=category, sort=sort, reverse=not asc)
-    try:
-        xfer = client.get_transfer_info()
-        dl  = speed_to_human(xfer.get("dl_info_speed", 0))
-        up  = speed_to_human(xfer.get("up_info_speed", 0))
-        header = (
-            f"[bold cyan]{len(torrents)}[/] torrent(s)"
-            f"  ↓ [green]{dl}[/]  ↑ [cyan]{up}[/]"
-            f"  [dim]{time.strftime('%H:%M:%S')}[/]"
-        )
-    except Exception:
-        header = f"[bold cyan]{len(torrents)}[/] torrent(s)"
-
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold dim", title=header, expand=True)
-    table.add_column("#",        style="dim",     width=4,  no_wrap=True)
-    table.add_column("Name",                      min_width=20, max_width=50)
-    table.add_column("State",                     width=13, no_wrap=True)
-    table.add_column("Size",     style="cyan",    width=9,  no_wrap=True)
-    table.add_column("Progress", style="green",   width=8,  no_wrap=True)
-    table.add_column("↓ Speed",  style="green",   width=10, no_wrap=True)
-    table.add_column("↑ Speed",  style="cyan",    width=10, no_wrap=True)
-    table.add_column("ETA",      style="yellow",  width=8,  no_wrap=True)
-    table.add_column("Ratio",                     width=6,  no_wrap=True)
-    table.add_column("Category", style="magenta", width=12, no_wrap=True)
-
-    for i, t in enumerate(torrents, 1):
-        table.add_row(
-            str(i), t["name"], state_badge(t["state"]), bytes_to_human(t["size"]),
-            f"{t['progress']*100:.1f}%", speed_to_human(t["dlspeed"]), speed_to_human(t["upspeed"]),
-            seconds_to_human(t.get("eta", -1)), f"{t.get('ratio', 0):.2f}",
-            t.get("category", "") or "[dim]—[/]",
-        )
-    return table
-
-@cli.command("list")
-@click.option("-f", "--filter",   "filt",    default="all",
-              type=click.Choice(["all","downloading","seeding","completed","paused","active","inactive","stalled","checking","moving","errored"]))
-@click.option("-c", "--category", default=None, shell_complete=complete_category)
-@click.option("-s", "--sort",     default="added_on",
-              type=click.Choice(["name","size","progress","dlspeed","upspeed","eta","ratio","added_on","completion_on"]))
-@click.option("--asc",            is_flag=True, help="Sort ascending (default: descending)")
-@click.option("-i", "--interval", default=0, show_default=True, help="Auto-refresh interval in seconds (0 = one-shot)")
-@click.pass_obj
-def list_torrents(obj, filt, category, sort, asc, interval):
-    """List torrents (use -i for live updating)."""
-    from rich.console import Group
-    client = get_client(obj)
-
-    if interval == 0:
-        table = _build_list_table(client, filt, category, sort, asc)
-        console.print(table)
-        console.print("[dim]Tip: Try pressing TAB after commands like pause/resume to autocomplete torrent names.[/]")
-        return
-
-    footer = Text(f"Auto-refreshing every {interval}s — Ctrl-C to exit", style="dim", justify="center")
-    with Live(console=console, refresh_per_second=1, screen=False) as live:
+    # Attempt to securely store the password using OS Keyring
+    saved_to_keyring = False
+    if HAS_KEYRING:
         try:
-            while True:
-                table = _build_list_table(client, filt, category, sort, asc)
-                live.update(Group(table, footer))
-                time.sleep(interval)
-        except KeyboardInterrupt:
+            keyring.set_password(SERVICE_NAME, username, password)
+            saved_to_keyring = True
+        except Exception as e:
             pass
 
+    # Fallback to plaintext config if keyring is missing or fails
+    if not saved_to_keyring:
+        console.print("[yellow]⚠ OS Keyring unavailable. Saving password to config file.[/]")
+        if not HAS_KEYRING:
+            console.print("[dim]Tip: run `pip install keyring` for secure password storage.[/dim]")
+        cfg["qbittorrent"]["password"] = password
+
+    # Write config
+    with open(CONFIG_PATH, "w") as f:
+        cfg.write(f)
+    os.chmod(CONFIG_PATH, 0o600)  # Secure the file regardless
+
+    # Test Connection
+    with console.status("[bold blue]Testing connection..."):
+        client = QBittorrentClient(host, port, username, password)
+        if client.login():
+            console.print("[green]✓ Connection successful! Configuration saved.[/]")
+        else:
+            console.print("[red]✗ Login failed. Please check credentials and try again.[/]")
+
+def load_client_from_config() -> QBittorrentClient | None:
+    """Loads client silently. Returns None if login fails or config is missing."""
+    cfg = configparser.ConfigParser()
+    if not CONFIG_PATH.exists():
+        return None
+        
+    cfg.read(CONFIG_PATH)
+    if "qbittorrent" not in cfg:
+        return None
+
+    section = cfg["qbittorrent"]
+    host, port, username = section.get("host"), section.get("port"), section.get("username")
+    
+    # Try retrieving password from keyring first, fallback to config.ini
+    password = None
+    if HAS_KEYRING:
+        try:
+            password = keyring.get_password(SERVICE_NAME, username)
+        except Exception:
+            pass
+            
+    if not password:
+        password = section.get("password")
+
+    if not host or not username or not password:
+        return None
+
+    client = QBittorrentClient(host, port, username, password)
+    if client.login():
+        return client
+    return None
 
 # ─────────────────────────────────────────────
-#  Info command
+#  TUI Modals
 # ─────────────────────────────────────────────
 
-@cli.command()
-@click.argument("name_or_hash", shell_complete=complete_torrent_name)
-@click.pass_obj
-def info(obj, name_or_hash):
-    """Show detailed info for a torrent."""
-    client = get_client(obj)
-    
-    targets = resolve_torrents(client, [name_or_hash])
-    if not targets: return
-    
-    # Just show the first match for Info
-    t_hash = targets[0]["hash"]
-    torrents = client.list_torrents()
-    t = next(t for t in torrents if t["hash"] == t_hash)
-    props = client.get_properties(t_hash)
+class DeleteModal(ModalScreen[tuple[bool, bool]]):
+    BINDINGS = [("escape", "cancel", "Cancel")]
+    CSS = """
+    DeleteModal { align: center middle; }
+    #dialog { grid-size: 2; grid-gutter: 1 2; grid-rows: 1fr 3; padding: 1 2; width: 60; height: 11; border: thick $background 80%; background: $surface; }
+    #question { column-span: 2; height: 1fr; width: 1fr; content-align: center middle; }
+    Button { width: 100%; }
+    """
 
-    panel_content = f"""[bold]{t['name']}[/]
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Are you sure you want to delete this torrent?", id="question")
+            yield Button("Delete (Keep Files)", variant="warning", id="del_keep")
+            yield Button("Delete (+ Files)", variant="error", id="del_files")
+            yield Button("Cancel", variant="primary", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "del_keep": self.dismiss((True, False))
+        elif event.button.id == "del_files": self.dismiss((True, True))
+        else: self.dismiss((False, False))
+
+    def action_cancel(self) -> None:
+        self.dismiss((False, False))
+
+
+class InfoModal(ModalScreen):
+    BINDINGS = [("escape", "close", "Close")]
+    CSS = """
+    InfoModal { align: center middle; }
+    #info-dialog { padding: 1 2; width: 80; height: 20; border: thick $background 80%; background: $surface; }
+    Button { margin-top: 1; width: 100%; }
+    """
+
+    def __init__(self, torrent_data: dict, props: dict):
+        super().__init__()
+        self.torrent_data = torrent_data
+        self.props = props
+
+    def compose(self) -> ComposeResult:
+        t = self.torrent_data
+        content = f"""[bold cyan]{t['name']}[/]
 
 [dim]Hash:[/]        {t['hash']}
-[dim]State:[/]       {state_badge(t['state'])}
-[dim]Category:[/]    {t.get('category') or '—'}
-[dim]Size:[/]        {bytes_to_human(t['size'])} (done: {bytes_to_human(t['completed'])})
+[dim]State:[/]       {t['state']}
+[dim]Size:[/]        {bytes_to_human(t['size'])} (done: {bytes_to_human(t.get('completed', 0))})
 [dim]Progress:[/]    {t['progress']*100:.2f}%
 [dim]Download:[/]    ↓ {speed_to_human(t['dlspeed'])}  ↑ {speed_to_human(t['upspeed'])}
 [dim]ETA:[/]         {seconds_to_human(t.get('eta', -1))}
-[dim]Ratio:[/]       {t.get('ratio', 0):.3f}
+[dim]Category:[/]    {t.get('category') or '—'}
 [dim]Seeds:[/]       {t.get('num_seeds', '?')} ({t.get('num_complete', '?')} in swarm)
 [dim]Peers:[/]       {t.get('num_leechs', '?')} ({t.get('num_incomplete', '?')} in swarm)
-[dim]Save path:[/]   {props.get('save_path', '?')}
-[dim]Added:[/]       {time.strftime('%Y-%m-%d %H:%M', time.localtime(t.get('added_on', 0)))}
-[dim]Tracker:[/]     {t.get('tracker', '—')}
+[dim]Save path:[/]   {self.props.get('save_path', '?')}
 """
-    console.print(Panel(panel_content, title="[bold cyan]Torrent Info[/]", border_style="cyan"))
+        with Vertical(id="info-dialog"):
+            yield Static(content)
+            yield Button("Close", variant="primary", id="close")
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss()
+
+    def action_close(self) -> None:
+        self.dismiss()
 
 # ─────────────────────────────────────────────
-#  Pause, Resume, Delete, Recheck
+#  Main TUI Application
 # ─────────────────────────────────────────────
 
-@cli.command()
-@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
-@click.pass_obj
-def pause(obj, names):
-    """Pause one or more torrents."""
-    client = get_client(obj)
-    targets = resolve_torrents(client, names)
-    if not targets: return
+class QbtApp(App):
+    TITLE = "qBittorrent CLI"
+    CSS = "DataTable { height: 100%; }"
 
-    joined_hashes = "|".join([t["hash"] for t in targets])
-    if client.pause(joined_hashes).ok:
-        affected_names = [t["name"] for t in targets]
-        console.print(f"[yellow]⏸[/]  Paused: [bold]{', '.join(affected_names)}[/]")
-    else:
-        console.print("[red]✗ Failed to pause torrents.[/]")
+    # App-level bindings
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+        ("p", "pause", "Pause"),
+        ("r", "resume", "Resume"),
+        ("d", "delete", "Delete"),
+        ("i", "info", "Info"),
+    ]
 
-@cli.command()
-@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
-@click.pass_obj
-def resume(obj, names):
-    """Resume one or more torrents."""
-    client = get_client(obj)
-    targets = resolve_torrents(client, names)
-    if not targets: return
+    def __init__(self, client: QBittorrentClient):
+        super().__init__()
+        self.client = client
+        self.torrent_map = {}
+        self.column_keys = []
 
-    joined_hashes = "|".join([t["hash"] for t in targets])
-    if client.resume(joined_hashes).ok:
-        affected_names = [t["name"] for t in targets]
-        console.print(f"[green]▶[/]  Resumed: [bold]{', '.join(affected_names)}[/]")
-    else:
-        console.print("[red]✗ Failed to resume torrents.[/]")
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield DataTable(id="torrents", cursor_type="row")
+        yield Footer()
 
-@cli.command()
-@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
-@click.option("--with-files", is_flag=True, help="Also delete downloaded files")
-@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
-@click.pass_obj
-def delete(obj, names, with_files, yes):
-    """Delete one or more torrents (optionally with files)."""
-    client = get_client(obj)
-    targets = resolve_torrents(client, names)
-    if not targets: return
-    
-    affected_names = [t["name"] for t in targets]
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        # Added Category, Removed Ratio
+        self.column_keys = table.add_columns(
+            "Name", "State", "Category", "Size", "Progress", "↓ Speed", "↑ Speed", "ETA"
+        )
+        self.update_data()
+        self.set_interval(1.5, self.update_data)
 
-    if not yes:
-        msg = f"Delete [bold]{len(targets)}[/] torrent(s):\n[cyan]" + "\n".join(affected_names) + "[/]\n"
-        if with_files:
-            msg += "\n[red bold]AND their files[/]"
-        msg += "?"
-        if not Confirm.ask(msg):
-            console.print("[dim]Aborted.[/]")
+    def update_data(self) -> None:
+        try:
+            torrents = self.client.list_torrents()
+            xfer = self.client.get_transfer_info()
+        except Exception:
+            self.sub_title = "[red]Connection lost![/]"
             return
 
-    joined_hashes = "|".join([t["hash"] for t in targets])
-    r = client.delete(joined_hashes, delete_files=with_files)
-    if r.ok:
-        icon = "🗑" if with_files else "✗"
-        console.print(f"{icon}  Deleted: [bold]{', '.join(affected_names)}[/]" + (" (+ files)" if with_files else ""))
-    else:
-        console.print(f"[red]✗ Failed ({r.status_code})[/]")
+        dl = speed_to_human(xfer.get("dl_info_speed", 0))
+        up = speed_to_human(xfer.get("up_info_speed", 0))
+        self.sub_title = f"↓ {dl}   ↑ {up}"
 
-@cli.command()
-@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
-@click.pass_obj
-def recheck(obj, names):
-    """Force re-check/hash-verify one or more torrents."""
-    client = get_client(obj)
-    targets = resolve_torrents(client, names)
-    if not targets: return
+        table = self.query_one(DataTable)
+        fetched_hashes = set()
 
-    joined_hashes = "|".join([t["hash"] for t in targets])
-    if client.recheck(joined_hashes).ok:
-        affected_names = [t["name"] for t in targets]
-        console.print(f"[blue]🔍[/] Rechecking: [bold]{', '.join(affected_names)}[/]")
-    else:
-        console.print("[red]✗ Failed to recheck.[/]")
+        for t in torrents:
+            hash_str = t["hash"]
+            fetched_hashes.add(hash_str)
 
+            # Pad size string to 10 chars so it right-aligns neatly in the cell
+            size_formatted = f"{bytes_to_human(t['size']):>10}"
+
+            cells = (
+                t["name"],
+                state_badge(t["state"]),
+                t.get("category", "") or "[dim]—[/]",
+                size_formatted,
+                f"{t['progress']*100:.1f}%",
+                speed_to_human(t["dlspeed"]),
+                speed_to_human(t["upspeed"]),
+                seconds_to_human(t.get("eta", -1)),
+            )
+
+            if hash_str in self.torrent_map:
+                for col_key, val in zip(self.column_keys, cells):
+                    table.update_cell(hash_str, col_key, val, update_width=True)
+            else:
+                table.add_row(*cells, key=hash_str)
+
+            self.torrent_map[hash_str] = t  
+
+        for hash_str in list(self.torrent_map.keys()):
+            if hash_str not in fetched_hashes:
+                table.remove_row(hash_str)
+                self.torrent_map.pop(hash_str)
+
+    def get_selected_hash(self) -> str | None:
+        table = self.query_one(DataTable)
+        if not table.is_valid_coordinate(table.cursor_coordinate):
+            return None
+        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        return row_key.value
+
+    # --- Commands & Navigation ---
+
+    def action_cursor_down(self) -> None:
+        """Pass Vim motion 'j' down to the data table."""
+        self.query_one(DataTable).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        """Pass Vim motion 'k' up to the data table."""
+        self.query_one(DataTable).action_cursor_up()
+
+    def action_pause(self) -> None:
+        t_hash = self.get_selected_hash()
+        if t_hash:
+            self.client.pause(t_hash)
+            self.notify("Paused torrent.")
+            self.update_data()
+
+    def action_resume(self) -> None:
+        t_hash = self.get_selected_hash()
+        if t_hash:
+            self.client.resume(t_hash)
+            self.notify("Resumed torrent.")
+            self.update_data()
+
+    def action_delete(self) -> None:
+        t_hash = self.get_selected_hash()
+        if not t_hash: return
+
+        def check_delete(result: tuple[bool, bool] | None) -> None:
+            if not result: return
+            confirm, delete_files = result
+            if confirm:
+                self.client.delete(t_hash, delete_files=delete_files)
+                self.notify("Torrent deleted.", severity="warning")
+                self.update_data()
+
+        self.push_screen(DeleteModal(), check_delete)
+
+    def action_info(self) -> None:
+        t_hash = self.get_selected_hash()
+        if not t_hash: return
+        
+        t_data = self.torrent_map.get(t_hash)
+        if t_data:
+            try:
+                props = self.client.get_properties(t_hash)
+                self.push_screen(InfoModal(t_data, props))
+            except Exception as e:
+                self.notify(f"Could not load details: {e}", severity="error")
 
 # ─────────────────────────────────────────────
-#  Set-category command
+#  Entry Point
 # ─────────────────────────────────────────────
-
-@cli.command("set-category")
-@click.argument("category", shell_complete=complete_category)
-@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
-@click.pass_obj
-def set_category(obj, category, names):
-    """Assign CATEGORY to one or more torrents."""
-    client = get_client(obj)
-    targets = resolve_torrents(client, names)
-    if not targets: return
-
-    joined_hashes = "|".join([t["hash"] for t in targets])
-    r = client.set_category(joined_hashes, category)
-    if r.ok:
-        affected_names = [t["name"] for t in targets]
-        console.print(f"[magenta]🏷[/]  Set category [bold]{category!r}[/] on: {', '.join(affected_names)}")
-    else:
-        console.print(f"[red]✗ Failed ({r.status_code}) — does the category exist?[/]")
-
-
-# ─────────────────────────────────────────────
-#  Add command
-# ─────────────────────────────────────────────
-
-@cli.command()
-@click.argument("torrent")
-@click.option("-p", "--path",     "save_path", default=None, help="Save path override")
-@click.option("-c", "--category", default=None, shell_complete=complete_category, help="Assign category")
-@click.option("--paused",         is_flag=True, help="Add in paused state")
-@click.pass_obj
-def add(obj, torrent, save_path, category, paused):
-    """Add a torrent by URL (magnet/http) or local .torrent file path."""
-    client = get_client(obj)
-    with console.status("[bold blue]Adding torrent…"):
-        if torrent.startswith(("magnet:", "http://", "https://")):
-            r = client.add_torrent_url(torrent, save_path=save_path, category=category, paused=paused)
-        else:
-            path = Path(torrent)
-            if not path.exists():
-                console.print(f"[red]✗ File not found: {torrent}[/]")
-                return
-            r = client.add_torrent_file(str(path), save_path=save_path, category=category, paused=paused)
-
-    if r.ok and r.text.strip() == "Ok.":
-        status = "paused" if paused else "started"
-        console.print(f"[green]✓[/] Torrent added ({status})" + (f" → category [magenta]{category}[/]" if category else ""))
-    else:
-        console.print(f"[red]✗ Failed: {r.text.strip()}[/]")
-
-
-# ─────────────────────────────────────────────
-#  Categories group
-# ─────────────────────────────────────────────
-
-@cli.group()
-def categories():
-    """Manage torrent categories."""
-    pass
-
-@categories.command("list")
-@click.pass_obj
-def categories_list(obj):
-    client = get_client(obj)
-    cats = client.get_categories()
-    if not cats:
-        console.print("[dim]No categories defined.[/]")
-        return
-    table = Table(box=box.SIMPLE_HEAVY, header_style="bold dim")
-    table.add_column("Category",  style="magenta bold")
-    table.add_column("Save Path", style="dim")
-    for name, meta in sorted(cats.items()):
-        table.add_row(name, meta.get("savePath") or "[dim]—[/]")
-    console.print(table)
-
-@categories.command("create")
-@click.argument("name")
-@click.option("-p", "--path", "save_path", default="", help="Default save path for category")
-@click.pass_obj
-def categories_create(obj, name, save_path):
-    client = get_client(obj)
-    if client.create_category(name, save_path).ok:
-        console.print(f"[green]✓[/] Category [magenta bold]{name}[/] created")
-    else:
-        console.print("[red]✗ Failed — category may already exist[/]")
-
-@categories.command("remove")
-@click.argument("names", nargs=-1, required=True, shell_complete=complete_category)
-@click.option("-y", "--yes", is_flag=True)
-@click.pass_obj
-def categories_remove(obj, names, yes):
-    if not yes and not Confirm.ask(f"Remove categories: [magenta]{', '.join(names)}[/]?"):
-        return
-    client = get_client(obj)
-    if client.remove_category("\n".join(names)).ok:
-        console.print(f"[green]✓[/] Removed: {', '.join(names)}")
-    else:
-        console.print("[red]✗ Failed to remove categories.[/]")
-
-
-
 
 if __name__ == "__main__":
-    cli(obj={})
+    # Check for CLI arguments
+    if len(sys.argv) > 1 and sys.argv[1] == "config":
+        run_config_flow()
+        sys.exit(0)
+
+    # Attempt to load and log in using existing config
+    client = load_client_from_config()
+
+    # If it fails, fall back to interactive configuration
+    if not client:
+        console.print("[yellow]Could not connect to qBittorrent. Please configure your settings:[/]")
+        run_config_flow()
+        client = load_client_from_config()
+        if not client:
+            console.print("[red]Fatal: Cannot login to qBittorrent. Exiting.[/]")
+            sys.exit(1)
+
+    # Launch the interactive App
+    app = QbtApp(client)
+    app.run()
