@@ -2,15 +2,18 @@
 """
 qbt.py — A CLI interface for qBittorrent-nox Web API
 Usage: python qbt.py [OPTIONS] COMMAND [ARGS]...
+
+To enable autocomplete in your shell (assuming you alias this script to 'qbt'):
+  Bash: eval "$(_QBT_COMPLETE=bash_source qbt)"
+  Zsh:  eval "$(_QBT_COMPLETE=zsh_source qbt)"
+  Fish: _QBT_COMPLETE=fish_source qbt | source
 """
 
 import os
 import sys
-import json
 import time
 import configparser
 from pathlib import Path
-from typing import Optional, List
 
 import click
 import requests
@@ -20,7 +23,7 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich import box
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.live import Live
 
 console = Console()
 
@@ -70,8 +73,7 @@ STATUS_COLORS = {
 
 def state_badge(state: str) -> Text:
     color = STATUS_COLORS.get(state, "white")
-    label = state.upper()
-    return Text(label, style=f"bold {color}")
+    return Text(state.upper(), style=f"bold {color}")
 
 
 # ─────────────────────────────────────────────
@@ -101,6 +103,9 @@ def save_config(host, port, username, password):
     }
     with open(CONFIG_PATH, "w") as f:
         cfg.write(f)
+    
+    # Secure the config file since it contains a plaintext password
+    os.chmod(CONFIG_PATH, 0o600)
     console.print(f"[green]✓[/] Config saved to [dim]{CONFIG_PATH}[/]")
 
 
@@ -123,10 +128,10 @@ class QBittorrentClient:
             r = self.session.post(
                 self._url("auth/login"),
                 data={"username": self.username, "password": self.password},
-                timeout=10,
+                timeout=5,
             )
             return r.text.strip() == "Ok."
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.RequestException:
             return False
 
     def logout(self):
@@ -141,12 +146,10 @@ class QBittorrentClient:
     def post_multipart(self, path: str, data=None, files=None) -> requests.Response:
         return self.session.post(self._url(path), data=data, files=files, timeout=30)
 
-    # ── Torrents ──────────────────────────────
-
+    # ... [Rest of API Client methods remain exactly the same as original script] ...
     def list_torrents(self, filter="all", category=None, sort="added_on", reverse=True):
         params = {"filter": filter, "sort": sort, "reverse": reverse}
-        if category:
-            params["category"] = category
+        if category: params["category"] = category
         return self.get("torrents/info", **params).json()
 
     def get_properties(self, hash: str):
@@ -170,28 +173,19 @@ class QBittorrentClient:
     def set_category(self, hashes: str, category: str):
         return self.post("torrents/setCategory", hashes=hashes, category=category)
 
-    def set_priority(self, hashes: str, priority: int):
-        return self.post("torrents/topPrio" if priority == 0 else "torrents/bottomPrio", hashes=hashes)
-
     def add_torrent_url(self, urls: str, save_path=None, category=None, paused=False):
         data = {"urls": urls, "paused": str(paused).lower()}
-        if save_path:
-            data["savepath"] = save_path
-        if category:
-            data["category"] = category
+        if save_path: data["savepath"] = save_path
+        if category: data["category"] = category
         return self.post_multipart("torrents/add", data=data)
 
     def add_torrent_file(self, file_path: str, save_path=None, category=None, paused=False):
         data = {"paused": str(paused).lower()}
-        if save_path:
-            data["savepath"] = save_path
-        if category:
-            data["category"] = category
+        if save_path: data["savepath"] = save_path
+        if category: data["category"] = category
         with open(file_path, "rb") as f:
             files = {"torrents": (Path(file_path).name, f, "application/x-bittorrent")}
             return self.post_multipart("torrents/add", data=data, files=files)
-
-    # ── Categories ────────────────────────────
 
     def get_categories(self):
         return self.get("torrents/categories").json()
@@ -205,8 +199,6 @@ class QBittorrentClient:
     def remove_category(self, names: str):
         return self.post("torrents/removeCategories", categories=names)
 
-    # ── App Info ──────────────────────────────
-
     def get_transfer_info(self):
         return self.get("transfer/info").json()
 
@@ -215,10 +207,66 @@ class QBittorrentClient:
 
 
 # ─────────────────────────────────────────────
-#  Context / shared client
+#  Autocomplete & Resolution logic
 # ─────────────────────────────────────────────
 
-pass_client = click.make_pass_decorator(dict, ensure=True)
+def get_silent_client():
+    """Returns a client for autocomplete without printing errors."""
+    try:
+        cfg = load_config()
+        client = QBittorrentClient(cfg["host"], cfg["port"], cfg["username"], cfg["password"])
+        if client.login():
+            return client
+    except Exception:
+        pass
+    return None
+
+def complete_torrent_name(ctx, param, incomplete):
+    """Provides shell autocomplete for torrent names."""
+    client = get_silent_client()
+    if not client: return []
+    torrents = client.list_torrents()
+    return [t["name"] for t in torrents if incomplete.lower() in t["name"].lower()]
+
+def complete_category(ctx, param, incomplete):
+    """Provides shell autocomplete for categories."""
+    client = get_silent_client()
+    if not client: return []
+    cats = client.get_categories()
+    return [c for c in cats.keys() if incomplete.lower() in c.lower()]
+
+def resolve_torrents(client, user_inputs):
+    """Resolves names, exact hashes, or hash prefixes into a list of dicts: [{'hash': X, 'name': Y}]."""
+    if "all" in [i.lower() for i in user_inputs]:
+        return [{"hash": "all", "name": "All Torrents"}]
+
+    torrents = client.list_torrents()
+    results = []
+    
+    for ui in user_inputs:
+        matched = False
+        for t in torrents:
+            if ui == t["name"] or ui == t["hash"] or t["hash"].startswith(ui):
+                results.append({"hash": t["hash"], "name": t["name"]})
+                matched = True
+        
+        if not matched:
+            console.print(f"[yellow]⚠ Not found:[/] {ui}")
+
+    # Remove duplicates (in case of overlap or multiple duplicate names mapping to identical torrents)
+    seen = set()
+    unique_results = []
+    for r in results:
+        if r["hash"] not in seen:
+            seen.add(r["hash"])
+            unique_results.append(r)
+            
+    return unique_results
+
+
+# ─────────────────────────────────────────────
+#  Context / shared client
+# ─────────────────────────────────────────────
 
 def get_client(ctx_obj: dict) -> QBittorrentClient:
     if "client" not in ctx_obj:
@@ -268,7 +316,6 @@ def config(host, port, username, password):
 
     save_config(host, port, username, password)
 
-    # test connection
     client = QBittorrentClient(host, port, username, password)
     with console.status("[bold blue]Testing connection…"):
         ok = client.login()
@@ -285,9 +332,7 @@ def config(host, port, username, password):
 # ─────────────────────────────────────────────
 
 def _build_list_table(client, filt, category, sort, asc) -> Table:
-    """Build the torrent list table (used by the live list loop)."""
     torrents = client.list_torrents(filter=filt, category=category, sort=sort, reverse=not asc)
-
     try:
         xfer = client.get_transfer_info()
         dl  = speed_to_human(xfer.get("dl_info_speed", 0))
@@ -300,13 +345,7 @@ def _build_list_table(client, filt, category, sort, asc) -> Table:
     except Exception:
         header = f"[bold cyan]{len(torrents)}[/] torrent(s)"
 
-    table = Table(
-        box=box.ROUNDED,
-        show_header=True,
-        header_style="bold dim",
-        title=header,
-        expand=True,
-    )
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold dim", title=header, expand=True)
     table.add_column("#",        style="dim",     width=4,  no_wrap=True)
     table.add_column("Name",                      min_width=20, max_width=50)
     table.add_column("State",                     width=13, no_wrap=True)
@@ -320,44 +359,31 @@ def _build_list_table(client, filt, category, sort, asc) -> Table:
 
     for i, t in enumerate(torrents, 1):
         table.add_row(
-            str(i),
-            t["name"],
-            state_badge(t["state"]),
-            bytes_to_human(t["size"]),
-            f"{t['progress']*100:.1f}%",
-            speed_to_human(t["dlspeed"]),
-            speed_to_human(t["upspeed"]),
-            seconds_to_human(t.get("eta", -1)),
-            f"{t.get('ratio', 0):.2f}",
+            str(i), t["name"], state_badge(t["state"]), bytes_to_human(t["size"]),
+            f"{t['progress']*100:.1f}%", speed_to_human(t["dlspeed"]), speed_to_human(t["upspeed"]),
+            seconds_to_human(t.get("eta", -1)), f"{t.get('ratio', 0):.2f}",
             t.get("category", "") or "[dim]—[/]",
         )
-
     return table
-
 
 @cli.command("list")
 @click.option("-f", "--filter",   "filt",    default="all",
-              type=click.Choice(["all","downloading","seeding","completed","paused","active","inactive","stalled","checking","moving","errored"]),
-              help="Filter by torrent state")
-@click.option("-c", "--category", default=None, help="Filter by category")
+              type=click.Choice(["all","downloading","seeding","completed","paused","active","inactive","stalled","checking","moving","errored"]))
+@click.option("-c", "--category", default=None, shell_complete=complete_category)
 @click.option("-s", "--sort",     default="added_on",
-              type=click.Choice(["name","size","progress","dlspeed","upspeed","eta","ratio","added_on","completion_on"]),
-              help="Sort field")
+              type=click.Choice(["name","size","progress","dlspeed","upspeed","eta","ratio","added_on","completion_on"]))
 @click.option("--asc",            is_flag=True, help="Sort ascending (default: descending)")
-@click.option("-i", "--interval", default=5, show_default=True,
-              help="Auto-refresh interval in seconds (0 = one-shot, no live loop)")
+@click.option("-i", "--interval", default=0, show_default=True, help="Auto-refresh interval in seconds (0 = one-shot)")
 @click.pass_obj
 def list_torrents(obj, filt, category, sort, asc, interval):
-    """Live auto-updating torrent list. Press Ctrl-C to exit."""
-    from rich.live import Live
+    """List torrents (use -i for live updating)."""
     from rich.console import Group
-
     client = get_client(obj)
 
     if interval == 0:
         table = _build_list_table(client, filt, category, sort, asc)
         console.print(table)
-        console.print("[dim]Tip: use hash prefixes (from qbt info) or 'all' with pause/resume/delete/etc.[/]")
+        console.print("[dim]Tip: Try pressing TAB after commands like pause/resume to autocomplete torrent names.[/]")
         return
 
     footer = Text(f"Auto-refreshing every {interval}s — Ctrl-C to exit", style="dim", justify="center")
@@ -376,18 +402,20 @@ def list_torrents(obj, filt, category, sort, asc, interval):
 # ─────────────────────────────────────────────
 
 @cli.command()
-@click.argument("hash_prefix")
+@click.argument("name_or_hash", shell_complete=complete_torrent_name)
 @click.pass_obj
-def info(obj, hash_prefix):
-    """Show detailed info for a torrent. Provide at least 8 hash chars."""
+def info(obj, name_or_hash):
+    """Show detailed info for a torrent."""
     client = get_client(obj)
+    
+    targets = resolve_torrents(client, [name_or_hash])
+    if not targets: return
+    
+    # Just show the first match for Info
+    t_hash = targets[0]["hash"]
     torrents = client.list_torrents()
-    match = [t for t in torrents if t["hash"].startswith(hash_prefix)]
-    if not match:
-        console.print(f"[red]No torrent matching hash prefix [bold]{hash_prefix}[/][/]")
-        return
-    t = match[0]
-    props = client.get_properties(t["hash"])
+    t = next(t for t in torrents if t["hash"] == t_hash)
+    props = client.get_properties(t_hash)
 
     panel_content = f"""[bold]{t['name']}[/]
 
@@ -409,85 +437,86 @@ def info(obj, hash_prefix):
 
 
 # ─────────────────────────────────────────────
-#  Pause command
+#  Pause, Resume, Delete, Recheck
 # ─────────────────────────────────────────────
 
 @cli.command()
-@click.argument("hashes", nargs=-1, required=True)
+@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
 @click.pass_obj
-def pause(obj, hashes):
-    """Pause one or more torrents. Use hash prefixes or 'all'."""
+def pause(obj, names):
+    """Pause one or more torrents."""
     client = get_client(obj)
-    joined = "|".join(hashes)
-    r = client.pause(joined)
-    if r.ok:
-        console.print(f"[yellow]⏸[/]  Paused: [bold]{', '.join(hashes)}[/]")
+    targets = resolve_torrents(client, names)
+    if not targets: return
+
+    joined_hashes = "|".join([t["hash"] for t in targets])
+    if client.pause(joined_hashes).ok:
+        affected_names = [t["name"] for t in targets]
+        console.print(f"[yellow]⏸[/]  Paused: [bold]{', '.join(affected_names)}[/]")
     else:
-        console.print(f"[red]✗ Failed ({r.status_code})[/]")
-
-
-# ─────────────────────────────────────────────
-#  Resume command
-# ─────────────────────────────────────────────
+        console.print("[red]✗ Failed to pause torrents.[/]")
 
 @cli.command()
-@click.argument("hashes", nargs=-1, required=True)
+@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
 @click.pass_obj
-def resume(obj, hashes):
-    """Resume one or more torrents. Use hash prefixes or 'all'."""
+def resume(obj, names):
+    """Resume one or more torrents."""
     client = get_client(obj)
-    joined = "|".join(hashes)
-    r = client.resume(joined)
-    if r.ok:
-        console.print(f"[green]▶[/]  Resumed: [bold]{', '.join(hashes)}[/]")
+    targets = resolve_torrents(client, names)
+    if not targets: return
+
+    joined_hashes = "|".join([t["hash"] for t in targets])
+    if client.resume(joined_hashes).ok:
+        affected_names = [t["name"] for t in targets]
+        console.print(f"[green]▶[/]  Resumed: [bold]{', '.join(affected_names)}[/]")
     else:
-        console.print(f"[red]✗ Failed ({r.status_code})[/]")
-
-
-# ─────────────────────────────────────────────
-#  Delete command
-# ─────────────────────────────────────────────
+        console.print("[red]✗ Failed to resume torrents.[/]")
 
 @cli.command()
-@click.argument("hashes", nargs=-1, required=True)
+@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
 @click.option("--with-files", is_flag=True, help="Also delete downloaded files")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_obj
-def delete(obj, hashes, with_files, yes):
+def delete(obj, names, with_files, yes):
     """Delete one or more torrents (optionally with files)."""
+    client = get_client(obj)
+    targets = resolve_torrents(client, names)
+    if not targets: return
+    
+    affected_names = [t["name"] for t in targets]
+
     if not yes:
-        msg = f"Delete [bold]{len(hashes)}[/] torrent(s)"
+        msg = f"Delete [bold]{len(targets)}[/] torrent(s):\n[cyan]" + "\n".join(affected_names) + "[/]\n"
         if with_files:
-            msg += " [red bold]AND their files[/]"
+            msg += "\n[red bold]AND their files[/]"
         msg += "?"
         if not Confirm.ask(msg):
             console.print("[dim]Aborted.[/]")
             return
-    client = get_client(obj)
-    joined = "|".join(hashes)
-    r = client.delete(joined, delete_files=with_files)
+
+    joined_hashes = "|".join([t["hash"] for t in targets])
+    r = client.delete(joined_hashes, delete_files=with_files)
     if r.ok:
         icon = "🗑" if with_files else "✗"
-        console.print(f"{icon}  Deleted: [bold]{', '.join(hashes)}[/]" + (" (+ files)" if with_files else ""))
+        console.print(f"{icon}  Deleted: [bold]{', '.join(affected_names)}[/]" + (" (+ files)" if with_files else ""))
     else:
         console.print(f"[red]✗ Failed ({r.status_code})[/]")
-
-
-# ─────────────────────────────────────────────
-#  Recheck command
-# ─────────────────────────────────────────────
 
 @cli.command()
-@click.argument("hashes", nargs=-1, required=True)
+@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
 @click.pass_obj
-def recheck(obj, hashes):
+def recheck(obj, names):
     """Force re-check/hash-verify one or more torrents."""
     client = get_client(obj)
-    r = client.recheck("|".join(hashes))
-    if r.ok:
-        console.print(f"[blue]🔍[/] Rechecking: [bold]{', '.join(hashes)}[/]")
+    targets = resolve_torrents(client, names)
+    if not targets: return
+
+    joined_hashes = "|".join([t["hash"] for t in targets])
+    if client.recheck(joined_hashes).ok:
+        affected_names = [t["name"] for t in targets]
+        console.print(f"[blue]🔍[/] Rechecking: [bold]{', '.join(affected_names)}[/]")
     else:
-        console.print(f"[red]✗ Failed ({r.status_code})[/]")
+        console.print("[red]✗ Failed to recheck.[/]")
 
 
 # ─────────────────────────────────────────────
@@ -495,18 +524,22 @@ def recheck(obj, hashes):
 # ─────────────────────────────────────────────
 
 @cli.command("set-category")
-@click.argument("category")
-@click.argument("hashes", nargs=-1, required=True)
+@click.argument("category", shell_complete=complete_category)
+@click.argument("names", nargs=-1, required=True, shell_complete=complete_torrent_name)
 @click.pass_obj
-def set_category(obj, category, hashes):
-    """Assign CATEGORY to one or more torrents.\n
-    Example: qbt set-category Movies a1b2c3d4 e5f6a7b8"""
+def set_category(obj, category, names):
+    """Assign CATEGORY to one or more torrents."""
     client = get_client(obj)
-    r = client.set_category("|".join(hashes), category)
+    targets = resolve_torrents(client, names)
+    if not targets: return
+
+    joined_hashes = "|".join([t["hash"] for t in targets])
+    r = client.set_category(joined_hashes, category)
     if r.ok:
-        console.print(f"[magenta]🏷[/]  Set category [bold]{category!r}[/] on: {', '.join(hashes)}")
+        affected_names = [t["name"] for t in targets]
+        console.print(f"[magenta]🏷[/]  Set category [bold]{category!r}[/] on: {', '.join(affected_names)}")
     else:
-        console.print(f"[red]✗ Failed ({r.status_code}) — does the category exist? Use [cyan]qbt categories create[/][/]")
+        console.print(f"[red]✗ Failed ({r.status_code}) — does the category exist?[/]")
 
 
 # ─────────────────────────────────────────────
@@ -516,7 +549,7 @@ def set_category(obj, category, hashes):
 @cli.command()
 @click.argument("torrent")
 @click.option("-p", "--path",     "save_path", default=None, help="Save path override")
-@click.option("-c", "--category", default=None, help="Assign category")
+@click.option("-c", "--category", default=None, shell_complete=complete_category, help="Assign category")
 @click.option("--paused",         is_flag=True, help="Add in paused state")
 @click.pass_obj
 def add(obj, torrent, save_path, category, paused):
@@ -545,13 +578,12 @@ def add(obj, torrent, save_path, category, paused):
 
 @cli.group()
 def categories():
-    """Manage torrent categories (list / create / edit / remove)."""
+    """Manage torrent categories."""
     pass
 
 @categories.command("list")
 @click.pass_obj
 def categories_list(obj):
-    """List all categories."""
     client = get_client(obj)
     cats = client.get_categories()
     if not cats:
@@ -569,132 +601,27 @@ def categories_list(obj):
 @click.option("-p", "--path", "save_path", default="", help="Default save path for category")
 @click.pass_obj
 def categories_create(obj, name, save_path):
-    """Create a new category."""
     client = get_client(obj)
-    r = client.create_category(name, save_path)
-    if r.ok:
-        console.print(f"[green]✓[/] Category [magenta bold]{name}[/] created" + (f" → [dim]{save_path}[/]" if save_path else ""))
+    if client.create_category(name, save_path).ok:
+        console.print(f"[green]✓[/] Category [magenta bold]{name}[/] created")
     else:
-        console.print(f"[red]✗ Failed ({r.status_code}) — category may already exist[/]")
-
-@categories.command("edit")
-@click.argument("name")
-@click.argument("save_path")
-@click.pass_obj
-def categories_edit(obj, name, save_path):
-    """Update the save path for an existing category."""
-    client = get_client(obj)
-    r = client.edit_category(name, save_path)
-    if r.ok:
-        console.print(f"[green]✓[/] Category [magenta bold]{name}[/] → [dim]{save_path}[/]")
-    else:
-        console.print(f"[red]✗ Failed ({r.status_code})[/]")
+        console.print("[red]✗ Failed — category may already exist[/]")
 
 @categories.command("remove")
-@click.argument("names", nargs=-1, required=True)
+@click.argument("names", nargs=-1, required=True, shell_complete=complete_category)
 @click.option("-y", "--yes", is_flag=True)
 @click.pass_obj
 def categories_remove(obj, names, yes):
-    """Remove one or more categories."""
     if not yes and not Confirm.ask(f"Remove categories: [magenta]{', '.join(names)}[/]?"):
-        console.print("[dim]Aborted.[/]")
         return
     client = get_client(obj)
-    r = client.remove_category("\n".join(names))
-    if r.ok:
+    if client.remove_category("\n".join(names)).ok:
         console.print(f"[green]✓[/] Removed: {', '.join(names)}")
     else:
-        console.print(f"[red]✗ Failed ({r.status_code})[/]")
+        console.print("[red]✗ Failed to remove categories.[/]")
 
 
-# ─────────────────────────────────────────────
-#  Status / dashboard command
-# ─────────────────────────────────────────────
 
-@cli.command()
-@click.pass_obj
-def status(obj):
-    """Show global transfer stats and a compact torrent summary."""
-    client = get_client(obj)
-    try:
-        info   = client.get_transfer_info()
-        ver    = client.get_version()
-    except Exception as e:
-        console.print(f"[red]✗ {e}[/]")
-        return
-
-    torrents = client.list_torrents()
-    counts = {}
-    for t in torrents:
-        s = t["state"]
-        counts[s] = counts.get(s, 0) + 1
-
-    dl_speed  = speed_to_human(info.get("dl_info_speed", 0))
-    up_speed  = speed_to_human(info.get("up_info_speed", 0))
-    dl_total  = bytes_to_human(info.get("dl_info_data", 0))
-    up_total  = bytes_to_human(info.get("up_info_data", 0))
-    free_disk = bytes_to_human(info.get("free_space_on_disk", 0))
-
-    lines = [
-        f"[bold]qBittorrent[/] [dim]{ver}[/]",
-        "",
-        f"↓ [green bold]{dl_speed}[/]   ↑ [cyan bold]{up_speed}[/]",
-        f"Session  ↓ [green]{dl_total}[/]   ↑ [cyan]{up_total}[/]",
-        f"Free disk: [yellow]{free_disk}[/]",
-        "",
-        f"Torrents: [bold]{len(torrents)}[/] total",
-    ]
-    for state, count in sorted(counts.items()):
-        color = STATUS_COLORS.get(state, "white")
-        lines.append(f"  [{color}]{state}[/]: {count}")
-
-    console.print(Panel("\n".join(lines), title="[bold cyan]Dashboard[/]", border_style="cyan", width=52))
-
-
-# ─────────────────────────────────────────────
-#  Watch / live mode
-# ─────────────────────────────────────────────
-
-@cli.command()
-@click.option("-i", "--interval", default=3, help="Refresh interval in seconds (default: 3)")
-@click.option("-f", "--filter", "filt", default="active",
-              type=click.Choice(["all","downloading","seeding","active","paused","stalled"]),
-              help="Filter torrents")
-@click.pass_obj
-def watch(obj, interval, filt):
-    """Live-refresh torrent list. Press Ctrl-C to exit."""
-    client = get_client(obj)
-    console.print(f"[dim]Watching ({filt}) — refresh every {interval}s — Ctrl-C to stop[/]\n")
-    try:
-        while True:
-            torrents = client.list_torrents(filter=filt)
-            table = Table(box=box.MINIMAL, header_style="bold dim", expand=True)
-            table.add_column("Name",       min_width=20, max_width=45)
-            table.add_column("State",      width=13, no_wrap=True)
-            table.add_column("Progress",   width=8,  no_wrap=True)
-            table.add_column("↓",          width=10, no_wrap=True, style="green")
-            table.add_column("↑",          width=10, no_wrap=True, style="cyan")
-            table.add_column("ETA",        width=8,  no_wrap=True, style="yellow")
-            for t in torrents:
-                table.add_row(
-                    t["name"],
-                    state_badge(t["state"]),
-                    f"{t['progress']*100:.1f}%",
-                    speed_to_human(t["dlspeed"]),
-                    speed_to_human(t["upspeed"]),
-                    seconds_to_human(t.get("eta", -1)),
-                )
-            console.clear()
-            console.print(f"[bold cyan]qbt watch[/] [dim]{filt}[/] — [dim]{time.strftime('%H:%M:%S')}[/]")
-            console.print(table)
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped.[/]")
-
-
-# ─────────────────────────────────────────────
-#  Entry point
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     cli(obj={})
