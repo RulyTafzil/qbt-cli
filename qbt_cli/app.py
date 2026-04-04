@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-qbt.py — An interactive TUI for qBittorrent-nox Web API using Textual.
+qbt-cli — An interactive TUI for qBittorrent-nox built with Textual.
+
 Usage:
-  python qbt.py         # Launch the TUI
-  python qbt.py config  # Run the setup wizard to update credentials
+  qbt           # Launch the TUI
+  qbt config    # Run the setup wizard to update credentials
 """
 
 import configparser
@@ -18,7 +19,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Header, Label, Static
+from textual.widgets import DataTable, Footer, Header, Label, Static
 
 try:
     import keyring
@@ -173,7 +174,7 @@ def run_config_flow():
         try:
             keyring.set_password(SERVICE_NAME, username, password)
             saved_to_keyring = True
-        except Exception as e:
+        except Exception:
             pass
 
     # Fallback to plaintext config if keyring is missing or fails
@@ -316,7 +317,6 @@ class CategoryModal(ModalScreen[str | None]):
     #title { height: 1; color: $text-muted; margin-bottom: 1; }
     .option { height: 1; color: $text-muted; }
     .option.selected { color: $text; }
-    #error { color: $error; height: 1; margin-top: 1; }
     """
 
     def __init__(self, current_category: str, categories: list[str]) -> None:
@@ -325,10 +325,7 @@ class CategoryModal(ModalScreen[str | None]):
         # Always offer "No category" as the first option to allow clearing
         self._options = ["(no category)"] + categories
         # Pre-select the torrent's current category if it's in the list
-        try:
-            self._focused_index = self._options.index(current_category) if current_category in categories else 0
-        except ValueError:
-            self._focused_index = 0
+        self._focused_index = self._options.index(current_category) if current_category in self._options else 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -452,7 +449,8 @@ class QbtApp(App):
             "ETA": 6,
         }
 
-        # 3. Add columns individually to apply the widths. Name column width will be recalculated based on window size
+        # Add columns individually to apply fixed widths.
+        # The Name column width is recalculated dynamically based on window size.
         self.column_keys = [
             table.add_column("Name", width=12, key="name"),
             table.add_column("State", width=fixed_widths["State"]),
@@ -473,7 +471,7 @@ class QbtApp(App):
         """Calculates and sets the width of the 'Name' column."""
         try:
             table = self.query_one(DataTable)
-        except:
+        except Exception:
             return
 
         # 1. Sum up the widths of all columns EXCEPT "name"
@@ -556,7 +554,7 @@ class QbtApp(App):
         row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
         return row_key.value
 
-    # --- Commands & Navigation ---
+    # ── Navigation ──────────────────────────────
 
     def action_cursor_down(self) -> None:
         """Pass Vim motion 'j' down to the data table."""
@@ -650,7 +648,6 @@ class QbtApp(App):
 # ─────────────────────────────────────────────
 #  Entry Point
 # ─────────────────────────────────────────────
-
 
 
 def main() -> None:
