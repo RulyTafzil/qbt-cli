@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qbt-cli"
+version = "0.1.0"
+description = "An interactive terminal UI for qBittorrent-nox"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.28",
+    "textual>=0.50",
+    "keyring>=24.0",
+]
+
+[project.scripts]
+qbt = "qbt_cli.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qbt_cli"]
