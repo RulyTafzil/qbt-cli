@@ -23,6 +23,7 @@ from textual.screen import ModalScreen
 
 try:
     import keyring
+
     HAS_KEYRING = True
 except ImportError:
     HAS_KEYRING = False
@@ -31,6 +32,7 @@ except ImportError:
 #  Helpers & Formatters
 # ─────────────────────────────────────────────
 
+
 def bytes_to_human(n: int) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if abs(n) < 1024.0:
@@ -38,35 +40,50 @@ def bytes_to_human(n: int) -> str:
         n /= 1024.0
     return f"{n:.1f} PB"
 
+
 def speed_to_human(n: int) -> str:
     return bytes_to_human(n) + "/s"
+
 
 def seconds_to_human(s: int) -> str:
     if s < 0 or s > 8640000:
         return "∞"
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
-    if h: return f"{h}h {m}m"
-    if m: return f"{m}m {sec}s"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {sec}s"
     return f"{sec}s"
 
+
 STATUS_COLORS = {
-    "downloading": "green", "uploading": "cyan",
-    "stalledDL": "yellow", "stalledUP": "yellow",
-    "pausedDL": "dim", "pausedUP": "dim",
-    "checkingDL": "blue", "checkingUP": "blue",
-    "queuedDL": "magenta", "queuedUP": "magenta",
-    "error": "red", "missingFiles": "red",
-    "moving": "blue", "unknown": "dim",
+    "downloading": "green",
+    "uploading": "cyan",
+    "stalledDL": "yellow",
+    "stalledUP": "yellow",
+    "pausedDL": "dim",
+    "pausedUP": "dim",
+    "checkingDL": "blue",
+    "checkingUP": "blue",
+    "queuedDL": "magenta",
+    "queuedUP": "magenta",
+    "error": "red",
+    "missingFiles": "red",
+    "moving": "blue",
+    "unknown": "dim",
 }
+
 
 def state_badge(state: str) -> Text:
     color = STATUS_COLORS.get(state, "white")
     return Text(state.upper(), style=f"bold {color}")
 
+
 # ─────────────────────────────────────────────
 #  API Client
 # ─────────────────────────────────────────────
+
 
 class QBittorrentClient:
     def __init__(self, host: str, port: str, username: str, password: str):
@@ -96,7 +113,9 @@ class QBittorrentClient:
         return self.session.post(self._url(path), data=data, timeout=15)
 
     def list_torrents(self, filter="all", sort="added_on", reverse=True):
-        return self.get("torrents/info", filter=filter, sort=sort, reverse=reverse).json()
+        return self.get(
+            "torrents/info", filter=filter, sort=sort, reverse=reverse
+        ).json()
 
     def get_properties(self, hash: str):
         return self.get("torrents/properties", hash=hash).json()
@@ -108,10 +127,13 @@ class QBittorrentClient:
         return self.post("torrents/resume", hashes=hashes)
 
     def delete(self, hashes: str, delete_files: bool = False):
-        return self.post("torrents/delete", hashes=hashes, deleteFiles=str(delete_files).lower())
+        return self.post(
+            "torrents/delete", hashes=hashes, deleteFiles=str(delete_files).lower()
+        )
 
     def get_transfer_info(self):
         return self.get("transfer/info").json()
+
 
 # ─────────────────────────────────────────────
 #  Config Logic & Safe Credential Storage
@@ -120,6 +142,7 @@ class QBittorrentClient:
 CONFIG_PATH = Path.home() / ".config" / "qbt-cli" / "config.ini"
 SERVICE_NAME = "qbt-cli"
 console = Console()
+
 
 def run_config_flow():
     """Interactive prompt for updating connection details securely."""
@@ -150,9 +173,13 @@ def run_config_flow():
 
     # Fallback to plaintext config if keyring is missing or fails
     if not saved_to_keyring:
-        console.print("[yellow]⚠ OS Keyring unavailable. Saving password to config file.[/]")
+        console.print(
+            "[yellow]⚠ OS Keyring unavailable. Saving password to config file.[/]"
+        )
         if not HAS_KEYRING:
-            console.print("[dim]Tip: run `pip install keyring` for secure password storage.[/dim]")
+            console.print(
+                "[dim]Tip: run `pip install keyring` for secure password storage.[/dim]"
+            )
         cfg["qbittorrent"]["password"] = password
 
     # Write config
@@ -166,7 +193,10 @@ def run_config_flow():
         if client.login():
             console.print("[green]✓ Connection successful! Configuration saved.[/]")
         else:
-            console.print("[red]✗ Login failed. Please check credentials and try again.[/]")
+            console.print(
+                "[red]✗ Login failed. Please check credentials and try again.[/]"
+            )
+
 
 def load_client_from_config() -> QBittorrentClient | None:
     """Loads client silently. Returns None if login fails or config is missing."""
@@ -179,7 +209,11 @@ def load_client_from_config() -> QBittorrentClient | None:
         return None
 
     section = cfg["qbittorrent"]
-    host, port, username = section.get("host"), section.get("port"), section.get("username")
+    host, port, username = (
+        section.get("host"),
+        section.get("port"),
+        section.get("username"),
+    )
 
     # Try retrieving password from keyring first, fallback to config.ini
     password = None
@@ -200,9 +234,11 @@ def load_client_from_config() -> QBittorrentClient | None:
         return client
     return None
 
+
 # ─────────────────────────────────────────────
 #  TUI Modals
 # ─────────────────────────────────────────────
+
 
 class DeleteModal(ModalScreen[tuple[bool, bool]]):
     BINDINGS = [("escape", "cancel", "Cancel")]
@@ -221,9 +257,12 @@ class DeleteModal(ModalScreen[tuple[bool, bool]]):
             yield Button("Cancel", variant="primary", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "del_keep": self.dismiss((True, False))
-        elif event.button.id == "del_files": self.dismiss((True, True))
-        else: self.dismiss((False, False))
+        if event.button.id == "del_keep":
+            self.dismiss((True, False))
+        elif event.button.id == "del_files":
+            self.dismiss((True, True))
+        else:
+            self.dismiss((False, False))
 
     def action_cancel(self) -> None:
         self.dismiss((False, False))
@@ -233,7 +272,9 @@ class InfoModal(ModalScreen):
     BINDINGS = [("escape", "close", "Close")]
     CSS = """
     InfoModal { align: center middle; }
-    #info-dialog { padding: 1 2; width: 80; height: 20; border: thick $background 80%; background: $surface; }
+    #info-dialog { padding: 1 2; width: 85; height: 25; border: thick $background 80%; background: $surface; }
+    #files-container { height: 1fr; border: sunken $background; margin-top: 1; padding: 0 1; overflow-y: scroll; }
+    #files-label { text-style: bold; margin-bottom: 1; }
     Button { margin-top: 1; width: 100%; }
     """
 
@@ -244,22 +285,46 @@ class InfoModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         t = self.torrent_data
-        content = f"""[bold cyan]{t['name']}[/]
+        content = f"""[bold cyan]{t["name"]}[/]
 
-[dim]Hash:[/]        {t['hash']}
-[dim]State:[/]       {t['state']}
-[dim]Size:[/]        {bytes_to_human(t['size'])} (done: {bytes_to_human(t.get('completed', 0))})
-[dim]Progress:[/]    {t['progress']*100:.2f}%
-[dim]Download:[/]    ↓ {speed_to_human(t['dlspeed'])}  ↑ {speed_to_human(t['upspeed'])}
-[dim]ETA:[/]         {seconds_to_human(t.get('eta', -1))}
-[dim]Category:[/]    {t.get('category') or '—'}
-[dim]Seeds:[/]       {t.get('num_seeds', '?')} ({t.get('num_complete', '?')} in swarm)
-[dim]Peers:[/]       {t.get('num_leechs', '?')} ({t.get('num_incomplete', '?')} in swarm)
-[dim]Save path:[/]   {self.props.get('save_path', '?')}
+[dim]Hash:[/]        {t["hash"]}
+[dim]State:[/]       {t["state"]}
+[dim]Size:[/]        {bytes_to_human(t["size"])} (done: {bytes_to_human(t.get("completed", 0))})
+[dim]Progress:[/]    {t["progress"] * 100:.2f}%
+[dim]Download:[/]    ↓ {speed_to_human(t["dlspeed"])}  ↑ {speed_to_human(t["upspeed"])}
+[dim]ETA:[/]         {seconds_to_human(t.get("eta", -1))}
+[dim]Category:[/]    {t.get("category") or "—"}
+[dim]Seeds:[/]       {t.get("num_seeds", "?")} ({t.get("num_complete", "?")} in swarm)
+[dim]Peers:[/]       {t.get("num_leechs", "?")} ({t.get("num_incomplete", "?")} in swarm)
+[dim]Save path:[/]   {self.props.get("save_path", "?")}
 """
         with Vertical(id="info-dialog"):
             yield Static(content)
+            yield Label("Files", id="files-label")
+            with Vertical(id="files-container"):
+                yield Static("Loading files...", id="file-list-content")
             yield Button("Close", variant="primary", id="close")
+
+    def on_mount(self) -> None:
+        self.populate_files()
+
+    def populate_files(self) -> None:
+        container = self.query_one("#files-container")
+        content_area = self.query_one("#file-list-content")
+
+        files = self.props.get("files", [])
+        if not files:
+            content_area.display = False
+            return
+
+        content_area.display = False
+        for file in files:
+            name = file.get("name", "Unknown")
+            size = bytes_to_human(file.get("size", 0))
+            priority = "[green]P [/]" if file.get("priority") else ""
+
+            file_line = Static(f"{priority}{name} ({size})")
+            container.mount(file_line)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss()
@@ -267,9 +332,11 @@ class InfoModal(ModalScreen):
     def action_close(self) -> None:
         self.dismiss()
 
+
 # ─────────────────────────────────────────────
 #  Main TUI Application
 # ─────────────────────────────────────────────
+
 
 class QbtApp(App):
     TITLE = "qBittorrent CLI"
@@ -297,7 +364,6 @@ class QbtApp(App):
         yield DataTable(id="torrents", cursor_type="row")
         yield Footer()
 
-
     # Setup DataTable
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
@@ -310,7 +376,7 @@ class QbtApp(App):
             "Progress": 6,
             "↓ Speed": 7,
             "↑ Speed": 7,
-            "ETA": 6
+            "ETA": 6,
         }
 
         # 3. Add columns individually to apply the widths. Name column width will be recalculated based on window size
@@ -330,7 +396,6 @@ class QbtApp(App):
         self.update_data()
         self.set_interval(1.5, self.update_data)
 
-
     def recalculate_table_width(self) -> None:
         """Calculates and sets the width of the 'Name' column."""
         try:
@@ -341,8 +406,7 @@ class QbtApp(App):
         # 1. Sum up the widths of all columns EXCEPT "name"
         # Note: we check col.key.value to compare the actual string
         fixed_width_sum = sum(
-            col.width for col in table.columns.values()
-            if col.key.value != "name"
+            col.width for col in table.columns.values() if col.key.value != "name"
         )
 
         # 2. Calculate remaining space
@@ -361,7 +425,6 @@ class QbtApp(App):
     def on_resize(self) -> None:
         """Called automatically by Textual when the terminal resizes."""
         self.recalculate_table_width()
-
 
     def update_data(self) -> None:
         try:
@@ -390,7 +453,7 @@ class QbtApp(App):
                 state_badge(t["state"]),
                 t.get("category", "") or "[dim]—[/]",
                 size_formatted,
-                f"{t['progress']*100:.1f}%",
+                f"{t['progress'] * 100:.1f}%",
                 speed_to_human(t["dlspeed"]),
                 speed_to_human(t["upspeed"]),
                 seconds_to_human(t.get("eta", -1)),
@@ -442,10 +505,12 @@ class QbtApp(App):
 
     def action_delete(self) -> None:
         t_hash = self.get_selected_hash()
-        if not t_hash: return
+        if not t_hash:
+            return
 
         def check_delete(result: tuple[bool, bool] | None) -> None:
-            if not result: return
+            if not result:
+                return
             confirm, delete_files = result
             if confirm:
                 self.client.delete(t_hash, delete_files=delete_files)
@@ -456,7 +521,8 @@ class QbtApp(App):
 
     def action_info(self) -> None:
         t_hash = self.get_selected_hash()
-        if not t_hash: return
+        if not t_hash:
+            return
 
         t_data = self.torrent_map.get(t_hash)
         if t_data:
@@ -465,6 +531,7 @@ class QbtApp(App):
                 self.push_screen(InfoModal(t_data, props))
             except Exception as e:
                 self.notify(f"Could not load details: {e}", severity="error")
+
 
 # ─────────────────────────────────────────────
 #  Entry Point
@@ -481,7 +548,9 @@ if __name__ == "__main__":
 
     # If it fails, fall back to interactive configuration
     if not client:
-        console.print("[yellow]Could not connect to qBittorrent. Please configure your settings:[/]")
+        console.print(
+            "[yellow]Could not connect to qBittorrent. Please configure your settings:[/]"
+        )
         run_config_flow()
         client = load_client_from_config()
         if not client:
