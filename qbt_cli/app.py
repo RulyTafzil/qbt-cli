@@ -57,32 +57,14 @@ def seconds_to_human(s: int) -> str:
     return f"{sec}s"
 
 
-STATUS_COLORS = {
-    "downloading": "green",
-    "uploading": "cyan",
-    "stalledDL": "yellow",
-    "stalledUP": "yellow",
-    "pausedDL": "dim",
-    "pausedUP": "dim",
-    "checkingDL": "blue",
-    "checkingUP": "blue",
-    "queuedDL": "magenta",
-    "queuedUP": "magenta",
-    "error": "red",
-    "missingFiles": "red",
-    "moving": "blue",
-    "unknown": "dim",
-}
-
-
 STATE_MAP = {
     "downloading": "⬇️",
     "uploading": "⬆️",
     "seeding": "⬆️",
     "pausedDL": "⏸️",
     "pausedUP": "⏸️",
-    "stalledDL": "🔄",  # was ⏸️ — stalled ≠ paused
-    "stalledUP": "🔄",  # was ✅ — stalled ≠ completed
+    "stalledDL": "🔄",
+    "stalledUP": "✅",
     "completed": "✅",
     "error": "❌",
     "missingFiles": "❌",
@@ -464,7 +446,7 @@ class QbtApp(App):
 
         # Setting fixed widths for the non-name columns.
         fixed_widths = {
-            "State": 9,
+            "State": 4,
             "Category": 8,
             "Size": 10,
             "Progress": 6,
@@ -506,7 +488,7 @@ class QbtApp(App):
 
         # 2. Calculate remaining space
         # A buffer of 2-4 is usually enough for the vertical scrollbar/borders
-        chrome_buffer = 16
+        chrome_buffer = 17
         available_width = self.size.width - fixed_width_sum - chrome_buffer
 
         # 3. Update the Name column width using the columns dict
