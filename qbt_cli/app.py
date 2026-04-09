@@ -446,7 +446,7 @@ class QbtApp(App):
 
         # Setting fixed widths for the non-name columns.
         fixed_widths = {
-            "State": 4,
+            "State": 1,
             "Category": 8,
             "Size": 10,
             "Progress": 6,
@@ -459,7 +459,7 @@ class QbtApp(App):
         # The Name column width is recalculated dynamically based on window size.
         self.column_keys = [
             table.add_column("Name", width=12, key="name"),
-            table.add_column("State", width=fixed_widths["State"]),
+            table.add_column("", width=fixed_widths["State"]),
             table.add_column("Category", width=fixed_widths["Category"]),
             table.add_column("      Size", width=fixed_widths["Size"]),
             table.add_column("Prog", width=fixed_widths["Progress"]),
