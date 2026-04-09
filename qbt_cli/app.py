@@ -75,9 +75,23 @@ STATUS_COLORS = {
 }
 
 
-def state_badge(state: str) -> Text:
-    color = STATUS_COLORS.get(state, "white")
-    return Text(state.upper(), style=f"bold {color}")
+def state_badge(state: str) -> str:
+    # Map the API state string to your chosen icon
+    # You can use the Emoji set for zero-configuration
+    STATE_MAP = {
+        "downloading": "⬇️",
+        "uploading": "⬆️",
+        "seeding": "⬆️",
+        "paused": "⏸️",
+        "completed": "✅",
+        "error": "❌",
+        "checking": "🔍",
+        "queued": "⏳",
+        "metadata": "⏳",
+    }
+
+    # Return the icon, or a default symbol if the state is unknown
+    return STATE_MAP.get(state.lower(), "❓")
 
 
 # ─────────────────────────────────────────────
@@ -264,8 +278,8 @@ class DeleteModal(ModalScreen[tuple[bool, bool]]):
 
     _OPTIONS = [
         ("Delete torrent and keep files", (True, False)),
-        ("Delete torrent and files",      (True, True)),
-        ("Cancel",                        (False, False)),
+        ("Delete torrent and files", (True, True)),
+        ("Cancel", (False, False)),
     ]
 
     def __init__(self) -> None:
@@ -325,7 +339,11 @@ class CategoryModal(ModalScreen[str | None]):
         # Always offer "No category" as the first option to allow clearing
         self._options = ["(no category)"] + categories
         # Pre-select the torrent's current category if it's in the list
-        self._focused_index = self._options.index(current_category) if current_category in self._options else 0
+        self._focused_index = (
+            self._options.index(current_category)
+            if current_category in self._options
+            else 0
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -624,7 +642,9 @@ class QbtApp(App):
                 return
             try:
                 self.client.set_category(t_hash, result)
-                self.notify(f"Category set to '{result}'." if result else "Category cleared.")
+                self.notify(
+                    f"Category set to '{result}'." if result else "Category cleared."
+                )
                 self.update_data()
             except Exception as e:
                 self.notify(f"Failed to set category: {e}", severity="error")
