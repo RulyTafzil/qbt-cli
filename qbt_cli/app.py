@@ -75,29 +75,29 @@ STATUS_COLORS = {
 }
 
 
-def state_badge(state: str) -> str:
-    # Map the API state string to your chosen icon
-    # You can use the Emoji set for zero-configuration
-    STATE_MAP = {
-        "downloading": "⬇️",
-        "uploading": "⬆️",
-        "seeding": "⬆️",
-        "pausedDL": "⏸️",
-        "pausedUP": "⏸️",
-        "stalledDL": "⏸️",
-        "stalledUP": "✅",
-        "completed": "✅",
-        "error": "❌",
-        "missingFiles": "❌",
-        "checkingDL": "🔍",
-        "checkingUP": "🔍",
-        "queuedDL": "⏳",
-        "queuedUP": "⏳",
-        "metadata": "⏳",
-    }
+STATE_MAP = {
+    "downloading": "⬇️",
+    "uploading": "⬆️",
+    "seeding": "⬆️",
+    "pausedDL": "⏸️",
+    "pausedUP": "⏸️",
+    "stalledDL": "🔄",  # was ⏸️ — stalled ≠ paused
+    "stalledUP": "🔄",  # was ✅ — stalled ≠ completed
+    "completed": "✅",
+    "error": "❌",
+    "missingFiles": "❌",
+    "checkingDL": "🔍",
+    "checkingUP": "🔍",
+    "queuedDL": "⏳",
+    "queuedUP": "⏳",
+    "moving": "🚚",
+    "metadata": "⏳",
+    "unknown": "❓",
+}
 
-    # Return the icon, or a default symbol if the state is unknown
-    return STATE_MAP.get(state.lower(), "❓")
+
+def state_badge(state: str) -> str:
+    return STATE_MAP.get(state, "❓")  # no .lower() — keys match API casing
 
 
 # ─────────────────────────────────────────────
