@@ -449,7 +449,7 @@ class QbtApp(App):
             "State": 2,
             "Category": 8,
             "Size": 10,
-            "Progress": 5,
+            "Progress": 4,
             "↓ Speed": 7,
             "↑ Speed": 7,
             "ETA": 6,
@@ -488,7 +488,7 @@ class QbtApp(App):
 
         # 2. Calculate remaining space
         # A buffer of 2-4 is usually enough for the vertical scrollbar/borders
-        chrome_buffer = 17
+        chrome_buffer = 18
         available_width = self.size.width - fixed_width_sum - chrome_buffer
 
         # 3. Update the Name column width using the columns dict
